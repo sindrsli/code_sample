@@ -1,0 +1,268 @@
+
+import operator
+import matplotlib.pyplot as plt
+import matplotlib
+import numpy as np
+from fermipy.gtanalysis import GTAnalysis
+from fermipy.plotting import ROIPlotter
+import matplotlib.patheffects as PathEffects
+from astropy.coordinates import SkyCoord
+from fermipy.jobs.target_analysis import *
+
+#import configuration files
+gta = GTAnalysis('config.yaml',logging={'verbosity': 3})
+matplotlib.interactive(True)
+
+#Perform data preparation
+gta.setup()
+
+#Delete sources connected to extended emission
+gta.delete_source('4FGL J1723.5-0501e')
+
+#Free all sources
+gta.free_sources()
+#Fix sources with npred<1
+gta.free_sources(minmax_npred=[0,1],free=False) 
+gta.fit()
+
+#Localize sources in ROI and >0.1 degree from boundary
+for s in gta.roi.sources:
+     if s.name!='isodiff':
+         if s.name!='galdiff':
+             if s['offset_roi_edge'] > -0.1: continue
+             gta.localize(s.name,fix_shape=True,free_background=False,
+             update=True, dtheta_max= 0.1, make_plots = True)
+
+#Fit spectral parameters of all sources in ROI
+gta.free_sources()
+for s in gta.roi.sources:
+     if s.name!='isodiff':
+         if s.name!='galdiff':
+             if s['offset_roi_edge'] < 0: continue
+             gta.free_source(s.name, free = False)
+gta.fit()
+
+#Defining function to perform optimization of outer ROI
+def B():
+    model = {'Index' : 2.0, 'SpatialModel' : 'PointSource', 
+    'SpectralModel': 'Powerlaw'}
+    for i in range(4): #Max iterations
+        gta.print_roi()
+        gta.free_sources(free=False)
+        srcs = gta.find_sources(model=model, sqrt_ts_threshold=3.0,
+        min_separation=0.5,multithread=True, sources_per_iter=50,
+        max_iter=1)
+        gta.print_roi()
+        
+        #Checking if all added sources are in R_inner
+        out = False
+        for s in range(len(srcs['sources'])):
+            if srcs['sources'][s]['offset']>1:
+                out = True
+        
+        #Deleting newly added sources in inner ROI
+        exc_lst = ['isodiff', 'galdiff']
+        for s in gta.roi.sources:
+            if '4FGL' in s.name:
+                exc_lst.append(s.name)
+        gta.delete_sources(distance = 1,  exclude = exc_lst)
+        
+        #Sources with TS>100 modeled with LogParabola:
+        for s in gta.roi.sources:
+            if 'PS' in s.name:
+                if s.name!='isodiff':
+                    if s.name!='galdiff':
+                        if s['ts']>100:
+                            gta.set_source_spectrum(s.name, 
+                            spectrum_type = 'LogParabola')
+        
+        if srcs['sources'] == []:
+            print('No more sources with TS>9')
+            print('No of iterations: ',i+1)
+            gta.free_sources()
+            for s in gta.roi.sources:
+                 if s.name!='isodiff':
+                     if s.name!='galdiff':
+                         if s['offset_roi_edge'] < 0: continue
+                         gta.free_source(s.name, free = False)
+            gta.fit()
+            
+            #Save
+            gta.write_roi('B4')
+            break
+            
+        if out == False:
+            print('All sources outside R_inner added to model')
+            print('No of iterations: ',i+1)
+            gta.free_sources()
+            for s in gta.roi.sources:
+                 if s.name!='isodiff':
+                     if s.name!='galdiff':
+                         if s['offset_roi_edge'] < 0: continue
+                         gta.free_source(s.name, free = False)
+            gta.fit()
+            
+            #Save
+            gta.write_roi('B4')
+            break
+            
+        if i == 5:    
+            print('Maximum number of iterations reached:',i+1)
+            break
+    return
+    
+#Run optimization of outer ROI
+B()
+
+#Defining function to perform optimization of inner ROI and test 
+#central source for extension
+def C():
+    
+    
+    #Add source of interest as point source
+    gta.add_source('FHES J1723.5-0501',{ 'glon' : 17.9, 'glat' : 16.96,
+    'SpectrumType' : 'PowerLaw', 'Index' : 2.0, 'Scale' : 1000,
+    'Prefactor' : 1e-11,'SpatialModel' : 'PointSource' })
+    
+    C_sources={}
+    for i in range(5):
+        #Testing for extention hypotisis:
+        gta.free_sources(free=False)
+        gta.free_sources(distance=1)
+        gta.free_sources(distance=1.5,pars='norm')
+        gta.free_source('FHES J1723.5-0501')
+        gta.free_source('galdiff', free=False)
+        gta.free_source('isodiff', free=False)
+        ext_1 = gta.extension('FHES J1723.5-0501',fit_position = 
+        True, free_background = True,spatial_model='RadialGaussian')
+
+        L_n_1 = ext_1['loglike_ptsrc']
+        L_n_m = ext_1['loglike_ext']
+        delta_mu = 1 
+        Delta_m = 2*(L_n_1-L_n_m+delta_mu)
+        
+        gta.write_roi('C_last')
+        
+        #Adding one additional source to the model. Will be in 
+        #R_inner after executing the B step of the analysis
+
+        model = {'Index' : 2.0, 'SpatialModel' : 'PointSource',
+        'SpectralModel': 'Powerlaw'}
+        srcs = gta.find_sources(model=model, sqrt_ts_threshold=3.0,
+        min_separation=0.5,multithread=True, sources_per_iter=5,
+        max_iter=1)
+        
+        s_in = []
+        for s in srcs['sources']:
+            if s['offset'] >1:
+                gta.delete_source(s['name'])
+            else:
+                s_in.append(s['name'])
+        for s in range(len(s_in)):
+            if s>0:
+                gta.delete_source(s_in[s])
+        if s_in==[]:
+            print('Found no sources with TS>9 in iteration ',i+1)
+            return 
+            
+        #Fitting all components in ROI
+        gta.free_sources()
+        for s in gta.roi.sources:
+                 if s.name!='isodiff':
+                     if s.name!='galdiff':
+                         if s['offset_roi_edge'] < 0: continue
+                         gta.free_source(s.name, free = False)
+        gta.fit()
+        
+        #Refit locations of central source and new sources in R_inner
+        C_sources[srcs['sources'][0]['name']] = srcs['sources']
+        [0]['ts']
+        C_sorted = sorted(C_sources.items(), key=lambda x: x[1],
+        reverse=True)
+        gta.localize('FHES J1723.5-0501',fix_shape=True,
+        free_background=False, update=True)
+        for s in C_sorted:
+            gta.localize(s[0],fix_shape=True,free_background=False, 
+            update=True, dtheta_max = 0.1)
+
+        #Test for extended emission
+        gta.free_sources(free=False)
+        gta.free_sources(distance=1)
+        gta.free_sources(distance=1.5,pars='norm')
+        gta.free_source('FHES J1723.5-0501')
+        gta.free_source('galdiff', free=False)
+        gta.free_source('isodiff', free=False)
+        ext_2= gta.extension('FHES J1723.5-0501',free_background = 
+        True,spatial_model='RadialGaussian')
+        
+        L_n_m_1 = ext_2['loglike_ext']
+        TS_m_1 = 2*(L_n_m_1-L_n_m)
+        
+        if Delta_m<0 and TS_m_1<16:
+            print('Delta_m>0 & TSm+1>16')
+            print('TS_m =', ext_1['ts_ext'])
+            return 
+    print('Number of maximum iterations reached')
+    return 
+
+#Run optimization of inner ROI
+C()
+
+#Free normalizations and spectral index for sources within 1 degree, 
+#and normalizations of sources within 1.5 degrees
+gta.free_sources(free=False)
+gta.free_sources(distance=1)
+gta.free_sources(distance=1.5,pars='norm')
+gta.free_source('galdiff', free=False)
+gta.free_source('isodiff', free=False)
+ext = gta.extension('FHES J1723.5-0501',fit_position = True, 
+free_background = True, spatial_model='RadialGaussian',update = True)
+
+#Fit all sources inside 6x6 ROI
+gta.free_sources()
+for s in gta.roi.sources:
+     if s.name!='isodiff':
+         if s.name!='galdiff':
+             if s['offset_roi_edge'] < 0: continue
+             gta.free_source(s.name, free = False)
+gta.fit()
+
+#Free normalizations and spectral index for sources within 1 degree,
+#and normalizations of sources within 1.5 degree
+gta.free_sources(free=False)
+gta.free_sources(distance=1)
+gta.free_sources(distance=1.5,pars='norm')
+gta.free_source('galdiff', free=False)
+gta.free_source('isodiff', free=False)
+ext = gta.extension('FHES J1723.5-0501',fit_position = True, 
+free_background = True, spatial_model='RadialGaussian',update = True)
+
+#Fit all sources inside 6x6 ROI
+gta.free_sources()
+for s in gta.roi.sources:
+     if s.name!='isodiff':
+         if s.name!='galdiff':
+             if s['offset_roi_edge'] < 0: continue
+             gta.free_source(s.name, free = False)
+gta.fit()
+
+#Add PSR J1720
+gta.add_source('PSR J1720-0533',{ 'glon' : 17.06662724, 'glat' : 
+17.25233543, 'SpectrumType' : 'PLSuperExpCutoff', 'Index1' : 1.54,
+'Scale' : 1000, 'Prefactor' : 1e-13,'Cutoff': 3700, 'SpatialModel':
+'PointSource' })
+
+#Free parameters of sources in ROI
+gta.free_sources(free=False)
+for s in gta.roi.sources:
+     if s.name!='isodiff':
+         if s.name!='galdiff':
+             if s.name != 'PSR J1720-0533':
+                 if s['offset_roi_edge'] > 0: continue
+                 gta.free_source(s.name)
+gta.free_source('PSR J1720-0533', pars = 'norm')
+
+#Perform the last fit to produce the final model including 
+#PSR J1720-0533
+gta.fit()
+
