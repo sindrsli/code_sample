@@ -1,1 +1,1 @@
-The code sample is the analysis algorithm I used during my work on PSR J1720-0533 using the Fermi-LAT analysis tools.
+The code sample is the analysis algorithm I made during my Master's thesis work on PSR J1720-0534 using the Fermi-LAT science tools. For more information see https://hdl.handle.net/11250/3073819, especially Chap. 3, Chap. 4.1 and Appendix A.
